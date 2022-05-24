@@ -17,23 +17,24 @@ from ray.rllib.models import ModelCatalog
 
 import tensorflow as tf
 from tensorflow.keras import layers
-from tensorflow.keras.layers import Input, Dense, Conv2D, MaxPooling2D, AveragePooling2D, Flatten, Dropout
+from tensorflow.keras.layers import Input, Dense, Conv2D, Conv3D, MaxPool2D, MaxPool3D, AvgPool2D, AvgPool3D, Flatten, Dropout
 
 class KerasModel(TFModelV2):
     def __init__(self, obs_space, action_space, num_outputs, model_config, name):
-        super(KerasModel, self).__init__(obs_space, action_space, num_outputs, model_config, name)
+        super(KerasQModel, self).__init__(obs_space, action_space, num_outputs, model_config, name)
         self.inputs = Input(shape=obs_space.shape)
-        layer_1 = Conv2D(6, (3, 3), activation="relu")(self.inputs)
-        layer_2 = AveragePooling2D()(layer_1)
-        layer_dropout = Dropout(0.1)(layer_2)
-        layer_3 = Conv2D(16, (3, 3), activation="relu")(layer_dropout)
-        layer_4 = AveragePooling2D()(layer_3)
-        layer_flatten = Flatten()(layer_4)
-        layer_5 = Dense(120, activation="relu")(layer_flatten)
-        layer_dropout2 = Dropout(0.3)(layer_5)
-        layer_6 = Dense(84, activation="relu")(layer_dropout2)
-        layer_out = Dense(num_outputs, activation=None)(layer_6)
-        value_out = Dense(1, activation=None)(layer_6)
+        conv_1 = Conv2D(16, (3, 3), strides=(2, 2), activation="relu")(self.inputs)
+        pool_1 = AvgPool2D(pool_size=(2, 2))(conv_1)
+        drop_1 = Dropout(0.1)(pool_1)
+        conv_2 = Conv2D(16, (3, 3), strides=(2, 2), activation="relu")(drop_1)
+        pool_2 = MaxPool2D(pool_size=(2,2))(conv_2)
+        drop_2 = Dropout(0.1)(pool_2)
+        flatten = Flatten()(drop_2)
+        dense_1 = Dense(64, activation="relu")(flatten)
+        dense_2 = Dense(64, activation="relu")(dense_1)
+        drop_3 = Dropout(0.2)(dense_2)
+        layer_out = Dense(num_outputs, activation="relu")(drop_3)
+        value_out = Dense(1, activation=None)(drop_3)
         self.base_model = tf.keras.Model(self.inputs, [layer_out, value_out])
 	
     def forward(self, input_dict, state, seq_lens):
@@ -48,33 +49,44 @@ class KerasQModel(DistributionalQTFModel):
     def __init__(self, obs_space, action_space, num_outputs, model_config, name, **kw):
         super(KerasQModel, self).__init__(obs_space, action_space, num_outputs, model_config, name, **kw)
         self.inputs = Input(shape=obs_space.shape)
-        conv_1 = Conv2D(32, (3, 3), activation="relu")(self.inputs)
-        pool_1 = AveragePooling2D(pool_size=(2, 2))(conv_1)
+        conv_1 = Conv2D(4, (3, 3), strides=(1, 1), activation="relu")(self.inputs)
+        pool_1 = AvgPool2D(pool_size=(2, 2))(conv_1)
         drop_1 = Dropout(0.1)(pool_1)
-        conv_2 = Conv2D(64, (3, 3), activation="relu")(drop_1)
-        pool_2 = MaxPooling2D(pool_size=(2,2))(conv_2)
+        conv_2 = Conv2D(16, (3, 3), strides=(4, 4), activation="relu")(drop_1)
+        pool_2 = MaxPool2D(pool_size=(2, 2))(conv_2)
         drop_2 = Dropout(0.1)(pool_2)
         flatten = Flatten()(drop_2)
-        dense_1 = Dense(128, activation="relu")(flatten)
-        dense_2 = Dense(128, activation="relu")(dense_1)
+        dense_1 = Dense(64, activation="relu")(flatten)
+        dense_2 = Dense(64, activation="relu")(dense_1)
         drop_3 = Dropout(0.2)(dense_2)
-        layer_out = Dense(num_outputs, activation="relu")(drop_3)
-        self.base_model = tf.keras.Model(self.inputs, layer_out)
+        layer_out = Dense(num_outputs, activation=None)(drop_3)
+        pre_value = Dense(128, activation="relu")(drop_3)
+        value_out = Dense(1, activation=None)(pre_value)
+        self.base_model = tf.keras.Model(self.inputs, [layer_out, value_out])
 	
     def forward(self, input_dict, state, seq_lens):
         input_values = tf.cast(input_dict["obs"], tf.float32)
-        model_out = self.base_model(input_values)
+        model_out, self._value_out = self.base_model(input_values)
         return model_out, state
+
+    def value_function(self):
+        return tf.reshape(self._value_out, [-1])
           
 class ModelTrainer:
-    def __init__(self, env="Breakout-v0", n_workers=4):
+    def __init__(self, model=0, env="Breakout-v0", n_workers=4):
         ray.init()
         ModelCatalog.register_custom_model("keras_model", KerasModel)
+        ModelCatalog.register_custom_model("keras_q_model", KerasQModel)
+        if model == 0:
+            model_type = "keras_model"
+        else:
+            model_type = "keras_q_model"
+
         config = {
             "env": env,
             "lr": 1e-3,
             "num_workers": n_workers,
-            "model": {"custom_model": "keras_model"},
+            "model": {"custom_model": model_type},
             "framework": "tf2",
         }
         self.train_config = ppo.DEFAULT_CONFIG.copy()
@@ -127,17 +139,3 @@ class ModelTrainer:
 
         env.close()
         print(f"Evaluation score: {score}")
-
-class ModelQTrainer:
-    def __init__(self, env="Breakout-v0"):
-        ray.init()
-        ModelCatalog.register_custom_model("keras_q_model", KerasQModel)
-        self.config = {
-            "env": env,
-            "num_workers": 4,
-            "model": {"custom_model": "keras_q_model"},
-            "framework": "tf2",
-        }
-
-    def run(self):
-        tune.run("DQN", stop={"episode_reward_mean": 10}, config=self.config)

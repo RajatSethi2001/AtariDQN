@@ -1,5 +1,4 @@
 from run_atari_copy import ModelTrainer
-from run_atari_copy import ModelQTrainer
 
-TestTrainer = ModelQTrainer()
-TestTrainer.run()
+TestTrainer = ModelTrainer(model=1)
+TestTrainer.train(10)
